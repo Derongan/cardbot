@@ -1,84 +1,66 @@
 var Steam = require('steam');
-var SteamTradeOffers = require('steam-tradeoffers');
-var SteamWebLogOn = require('steam-weblogon');
-var getSteamAPIKey = require('steam-web-api-key');
 var fs = require('fs');
-var crypto = require('crypto');
-var logininfo = require('./logininfo.js');
 
-var admin = logininfo.getinfo('i');
-var logOnOptions = { account_name: logininfo.getinfo('u'), password: logininfo.getinfo('p') };
-var authCode = logininfo.getinfo('a');
 
 var sentry = fs.readFileSync('sentry');
-var servers = fs.readFileSync('servers');
 
-console.log('Logging in with user: ' + logOnOptions.account_name);
+var admin = "";
 
-if (sentry != '') {
-	logOnOptions.sha_sentryfile = getSHA1(sentry);
-	console.log('Using sentry file for login!');
-} else {
-    logOnOptions.auth_code = authCode;
-	console.log('Using authCode for login, or requesting new one. Current authCode: ' + logOnOptions.auth_code);
-}
 
-// if we've saved a server list, use it
-if (servers != '') {
-  Steam.servers = JSON.parse(servers);
-}
-
-var steamClient = new Steam.SteamClient();
-var steamUser = new Steam.SteamUser(steamClient);
-var steamFriends = new Steam.SteamFriends(steamClient);
-var steamWebLogOn = new SteamWebLogOn(steamClient, steamUser);
+/*******************************************************/
+/*                      Objects                        */
+/*******************************************************/
+var bot = new Steam.SteamClient();
+var SteamTradeOffers = require('steam-tradeoffers');
 var offers = new SteamTradeOffers();
 
 var ready = false;
+
 var sessionid = false;
 
-steamClient.connect();
-steamClient.on('connected', function() {
-  steamUser.logOn(logOnOptions);
+bot.logOn({
+    accountName: '',
+    password: '',
+    //authCode: ''
+    shaSentryfile: sentry
 });
 
-steamClient.on('logOnResponse', function(logonResp) {
-	if (logonResp.eresult == Steam.EResult.OK) {
-		console.log('Logged in!');
-		steamFriends.setPersonaState(Steam.EPersonaState.Online); // to display your bot's status as "Online"
-		steamFriends.setPersonaName(logininfo.getinfo('n')); // to change its nickname
-		steamUser.gamesPlayed({games_played: [{ game_id: '440' }]});
-		console.log('Playing some Team Fortress 2 while waiting for trades!');
-		steamWebLogOn.webLogOn(function(sessionID, newCookie) {
-			getSteamAPIKey({
-				sessionID: sessionID,
-				webCookie: newCookie
-			}, function(err, APIKey) {
-				offers.setup({
-					sessionID: sessionID,
-					webCookie: newCookie,
-					APIKey: APIKey
-				});
-			});
-		});
-	}
-});
-
-steamClient.on('servers', function(servers) {
-  fs.writeFile('servers', JSON.stringify(servers));
-});
-
-steamUser.on('updateMachineAuth', function(sentry, callback) {
-  fs.writeFileSync('sentry', sentry.bytes);
-  callback({ sha_file: getSHA1(sentry.bytes) });
+bot.on('sentry', function(hash) {
+    console.log('Storing hash: '+hash);
+    fs.writeFile("sentry", hash);
 });
 
 
-steamClient.on('error', function(e) {
+bot.on('loggedOn', function() {
+    console.log('Logged in!');
+    bot.setPersonaState(Steam.EPersonaState.Online); // to display your bot's status as "Online"
+    bot.setPersonaName('1:1 Same Game Card Bot'); // to change its nickname
+});
+
+bot.on('webSessionID', function(sessionID) {
+    sessionid = sessionID;
+    bot.webLogOn(function(newCookie){
+
+        offers.setup({
+            sessionID: sessionID,
+            webCookie: newCookie
+        });
+        ready = true;
+    }); 
+});
+
+bot.on('error', function(e) {
+    if(e.cause == 'logonFail' && e.eresult==63)
+    {
+        console.log('Check steamguard');
+    }
+    else
+    {
         console.log('Error: '+e.cause);
+    }
 });
 
-steamUser.on('tradeOffers', function(count) {
+bot.on('tradeOffers', function(count) {
     console.log('Trade offer changed: ' + count);
     if(count > 0)
     {
@@ -86,7 +68,7 @@ steamUser.on('tradeOffers', function(count) {
     }
 });
 
-steamFriends.on('friendMsg', function(sid, message, type)
+bot.on('friendMsg', function(sid, message, type)
 {
     
     if(type != Steam.EChatEntryType.ChatMsg)
@@ -98,22 +80,24 @@ steamFriends.on('friendMsg', function(sid, message, type)
     {
         switch(message.substring(1))
         {
+            //case "force":
+            //    bot.dealWithOffers();
             case "trade":
             case "tradeready":
-                steamFriends.sendMessage(sid, "Trade " + (ready ? "ONLINE" : "OFFLINE"));
+                bot.sendMessage(sid, "Trade " + (ready ? "ONLINE" : "OFFLINE"));
                 break;
             case "fake":
-                steamFriends.sendMessage(sid, "Faking a new trade offer coming in");
+                bot.sendMessage(sid, "Faking a new trade offer coming in");
                 getTrades();
                 break;
             case "help":
             default:
-                steamFriends.sendMessage(sid, "Available commands: ?tradeready");
+                bot.sendMessage(sid, "Available commands: ?tradeready");
         }
     }
     else
     {
-        steamFriends.sendMessage(sid, "Input not recongized. Enter ? for info");        
+        bot.sendMessage(sid, "Input not recongized. Enter ? for info");        
     }
 });
 
@@ -218,8 +202,8 @@ function handleTrades(error, body)
                 declined = true;
             }
             
-            console.log("Giving "+JSON.stringify(give));
-            console.log("Receiving "+JSON.stringify(receive));
+            //console.log("Giving "+JSON.stringify(give));
+            //console.log("Receiving "+JSON.stringify(receive));
             
             for(itemid in give)
             {
@@ -258,16 +242,11 @@ function handleTrades(error, body)
                         declined = true;
                 }
             }
-            //console.log(offer.steamid_other);
-			//Admin override trade restrictions
-			if (offer.steamid_other === admin) {
-				declined = false;
-				console.log('This is an admin trade, setting declined to false to allow trade no matter what!');
-			}
+            //console.log(offer.accountid_other);
             if(declined)
             {
                 offers.declineOffer({tradeOfferId: offer.tradeofferid});
-                console.warn("Declined offer #"+offer.tradeofferid+" from "+offer.steamid_other);
+                console.warn("Declined offer #"+offer.tradeofferid+" from "+offer.accountid_other);
             }
             else
             {
@@ -277,21 +256,15 @@ function handleTrades(error, body)
                     {
                         ready = false;
                         console.log("Reseting cookies");                        
-                        steamUser.webLogOn(function(newCookie){
+                        bot.webLogOn(function(newCookie){
                             offers.setup(sessionid, newCookie, function(){getTrades()});
                             ready = true;
                         }); 
                     }*/
                 });
-                console.warn("Accepted offer #"+offer.tradeofferid+" from "+offer.steamid_other);
+                console.warn("Accepted offer #"+offer.tradeofferid+" from "+offer.accountid_other);
             }
         });
     }
     console.log("Done handling offers");
-}
-
-function getSHA1(bytes) {
-  var shasum = crypto.createHash('sha1');
-  shasum.end(bytes);
-  return shasum.read();
 }
